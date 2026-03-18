@@ -3,6 +3,7 @@ const path = require("path");
 const fs = require("fs");
 const { execSync } = require("child_process");
 const ffmpeg = require("fluent-ffmpeg");
+const https = require("https");
 
 const app = express();
 app.use(express.json());
@@ -15,14 +16,50 @@ const MOODS = {
 };
 
 const OUTPUT = path.join(__dirname, "output");
-const TEMP = path.join(__dirname, "temp_studio_v3");
+const TEMP = path.join(__dirname, "temp_studio_vfinal");
 const BGM_DIR = path.join(__dirname, "assets", "bgm");
 const SFX_DIR = path.join(__dirname, "assets", "sfx");
 [OUTPUT, TEMP, BGM_DIR, SFX_DIR].forEach(dir => { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); });
 
 function uid() { return Date.now() + "_" + Math.floor(Math.random() * 1000); }
 
-// 🔹 Smart SFX Trigger (Keyword based)
+// 🔹 Delay helper
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// 🔹 Smart Text Splitter for Google TTS (200 char limit fix)
+function splitText(text, limit = 150) {
+    const chunks = [];
+    const sentences = text.replace(/([।\.!\?\n])/g, "$1|").split("|");
+    let current = "";
+    for (let s of sentences) {
+        if ((current + s).length > limit) {
+            if (current) chunks.push(current.trim());
+            current = s;
+        } else {
+            current += s;
+        }
+    }
+    if (current.trim()) chunks.push(current.trim());
+    return chunks;
+}
+
+// 🔹 High Quality Google TTS Downloader (Works on VPS/Linux)
+async function downloadGTTS(text, filepath) {
+    return new Promise((resolve, reject) => {
+        const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text.substring(0, 200))}&tl=hi&client=tw-ob`;
+        const file = fs.createWriteStream(filepath);
+        https.get(url, (res) => {
+            if (res.statusCode !== 200) {
+                reject(new Error(`Google Error: ${res.statusCode}`));
+                return;
+            }
+            res.pipe(file);
+            file.on('finish', () => { file.close(); resolve(); });
+        }).on('error', (err) => { fs.unlink(filepath, () => {}); reject(err); });
+    });
+}
+
+// 🔹 Smart SFX Trigger
 function getSFXTrigger(text) {
     if (text.includes("बारिश") || text.includes("बूँदें")) return "rain.mp3";
     if (text.includes("दरवाजा") || text.includes("खिड़की") || text.includes("अलमारी")) return "door.mp3";
@@ -34,7 +71,7 @@ function getSFXTrigger(text) {
 
 app.post("/tts-single", async (req, res) => {
     const { text, mood, mode, speaker } = req.body;
-    if (!text) return res.status(400).json({ error: "Empty" });
+    if (!text) return res.status(400).json({ error: "Empty Script" });
     
     const sessionId = uid();
     const sessionDir = path.join(TEMP, sessionId);
@@ -46,61 +83,77 @@ app.post("/tts-single", async (req, res) => {
 
     try {
         if (mode === 'auto') {
-            console.log(`🎬 Smart Cinematic Mix Start: ${sessionId}`);
+            console.log(`🎬 Producing Universal Chapter: ${sessionId}`);
             const lines = text.split('\n').filter(l => l.trim().length > 1);
+            let chunkCounter = 0;
 
-            for (let i = 0; i < lines.length; i++) {
-                let line = lines[i];
-                let voice = "Lekha";
-                let rate = 145;
+            for (let line of lines) {
+                let speedScale = 1.0;
 
                 // Character Detect
-                if (line.match(/अजय\s*[:|-]/)) { voice = "Aman"; rate = 155; line = line.replace(/अजय\s*[:|-]/, "").trim(); }
-                else if (line.match(/बूढ़ा आदमी\s*[:|-]|बूढ़ा\s*[:|-]/)) { voice = "Aman"; rate = 110; line = line.replace(/.*[:|-]/, "").trim(); }
+                if (line.match(/अजय\s*[:|-]/)) { speedScale = 1.1; line = line.replace(/अजय\s*[:|-]/, "").trim(); }
+                else if (line.match(/बूढ़ा आदमी\s*[:|-]|बूढ़ा\s*[:|-]/)) { speedScale = 0.8; line = line.replace(/.*[:|-]/, "").trim(); }
 
-                const cAiff = path.join(sessionDir, `c_${i}.aiff`);
-                const cMp3 = path.join(sessionDir, `c_${i}.mp3`);
-                execSync(`say -v "${voice}" -r ${rate} -o "${cAiff}" "${line.replace(/"/g, '')}"`);
-                execSync(`ffmpeg -y -i "${cAiff}" -codec:a libmp3lame -qscale:a 2 "${cMp3}"`, {stdio:'ignore'});
-                timeline.push(cMp3);
-
-                // 🔹 Smart SFX Injection
-                const sfxAsset = getSFXTrigger(lines[i]);
-                if (sfxAsset && fs.existsSync(path.join(SFX_DIR, sfxAsset)) && fs.statSync(path.join(SFX_DIR, sfxAsset)).size > 1000) {
-                    const sfxPath = path.join(SFX_DIR, sfxAsset);
-                    console.log(`🔊 Injected SFX: ${sfxAsset}`);
-                    timeline.push(sfxPath);
+                const subChunks = splitText(line, 150);
+                for (let sub of subChunks) {
+                    const rawPart = path.join(sessionDir, `p_${chunkCounter}.mp3`);
+                    const speedPart = path.join(sessionDir, `s_${chunkCounter}.mp3`);
+                    
+                    await downloadGTTS(sub, rawPart);
+                    // Apply speed scale for character acting
+                    execSync(`ffmpeg -y -i "${rawPart}" -filter:a "atempo=${speedScale}" "${speedPart}"`, {stdio: 'ignore'});
+                    timeline.push(speedPart);
+                    
+                    await wait(350); // Prevent Google block
+                    chunkCounter++;
                 }
 
-                // Gap
-                const gap = path.join(sessionDir, `g_${i}.mp3`);
-                execSync(`ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 0.6 "${gap}"`, {stdio:'ignore'});
+                // Inject SFX
+                const sfx = getSFXTrigger(lines[i] || line);
+                if (sfx && fs.existsSync(path.join(SFX_DIR, sfx))) {
+                    timeline.push(path.join(SFX_DIR, sfx));
+                }
+
+                // Dramatic Gap
+                const gap = path.join(sessionDir, `g_${chunkCounter}.mp3`);
+                execSync(`ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 0.7 "${gap}"`, {stdio:'ignore'});
                 timeline.push(gap);
             }
 
             const listFile = path.join(sessionDir, "list.txt");
             fs.writeFileSync(listFile, timeline.map(f => `file '${f}'`).join('\n'));
-            const raw = path.join(sessionDir, "raw.mp3");
-            execSync(`ffmpeg -y -f concat -safe 0 -i "${listFile}" -c copy "${raw}"`, {stdio:'ignore'});
+            const rawMaster = path.join(sessionDir, "raw.mp3");
+            execSync(`ffmpeg -y -f concat -safe 0 -i "${listFile}" -c copy "${rawMaster}"`, {stdio:'ignore'});
             
             const bgm = path.join(BGM_DIR, `${config.bgm}.mp3`);
             if (config.bgm !== "none" && fs.existsSync(bgm)) {
-                execSync(`ffmpeg -y -i "${raw}" -i "${bgm}" -filter_complex "[1:a]aloop=loop=-1:size=2e9,volume=${config.vol}[bgm];[0:a][bgm]amix=inputs=2:duration=first[out]" -map "[out]" "${finalMp3}"`, {stdio:'ignore'});
-            } else { fs.copyFileSync(raw, finalMp3); }
-            
+                execSync(`ffmpeg -y -i "${rawMaster}" -i "${bgm}" -filter_complex "[1:a]aloop=loop=-1:size=2e9,volume=${config.vol}[bgm];[0:a][bgm]amix=inputs=2:duration=first[out]" -map "[out]" "${finalMp3}"`, {stdio:'ignore'});
+            } else { fs.copyFileSync(rawMaster, finalMp3); }
+
         } else {
             // Solo Mode
-            let voice = (speaker === 'ajay' || speaker === 'oldman') ? "Aman" : "Lekha";
-            let rate = (speaker === 'oldman') ? 110 : (speaker === 'ajay' ? 155 : 145);
-            const sAiff = path.join(sessionDir, `s.aiff`);
-            execSync(`say -v "${voice}" -r ${rate} -o "${sAiff}" "${text.replace(/"/g, '')}"`);
-            execSync(`ffmpeg -y -i "${sAiff}" -codec:a libmp3lame -qscale:a 2 "${finalMp3}"`, {stdio:'ignore'});
+            let speed = (speaker === 'oldman') ? 0.8 : (speaker === 'ajay' ? 1.1 : 1.0);
+            const subChunks = splitText(text, 150);
+            const parts = [];
+            for (let i = 0; i < subChunks.length; i++) {
+                const rp = path.join(sessionDir, `r_${i}.mp3`);
+                const sp = path.join(sessionDir, `s_${i}.mp3`);
+                await downloadGTTS(subChunks[i], rp);
+                execSync(`ffmpeg -y -i "${rp}" -filter:a "atempo=${speed}" "${sp}"`, {stdio: 'ignore'});
+                parts.push(sp);
+                await wait(300);
+            }
+            const lf = path.join(sessionDir, "list_solo.txt");
+            fs.writeFileSync(lf, parts.map(f => `file '${f}'`).join('\n'));
+            execSync(`ffmpeg -y -f concat -safe 0 -i "${lf}" -c copy "${finalMp3}"`, {stdio:'ignore'});
         }
 
         fs.rmSync(sessionDir, { recursive: true, force: true });
         res.json({ success: true, url: `/output/${sessionId}.mp3` });
-
-    } catch (err) { res.status(500).json({ error: "Fail" }); }
+    } catch (err) { 
+        console.error(err);
+        res.status(500).json({ error: "Server Error" }); 
+    }
 });
 
 app.delete("/api/audio/:id", (req, res) => {
@@ -113,68 +166,55 @@ app.use("/output", express.static(OUTPUT));
 
 app.get("/", (req, res) => {
     const audioFiles = fs.readdirSync(OUTPUT).filter(f => f.endsWith(".mp3")).sort((a,b) => fs.statSync(path.join(OUTPUT, b)).mtime - fs.statSync(path.join(OUTPUT, a)).mtime);
-    const listHtml = audioFiles.map(f => `<div class="audio-card"><div class="audio-info"><h3>Cinetic Mix</h3><p>${f.substring(0,10)}...</p></div><audio controls src="/output/${f}"></audio><button class="del-btn" onclick="del('${f.replace(".mp3","")}')">×</button></div>`).join("");
+    const listHtml = audioFiles.map(f => `<div class="audio-card"><div class="audio-info"><h3>Story Recording</h3><p>${f.substring(0,10)}...</p></div><audio controls src="/output/${f}"></audio><button class="del-btn" onclick="del('${f.replace(".mp3","")}')">×</button></div>`).join("");
 
     res.send(`<!DOCTYPE html>
     <html lang="en">
     <head>
-        <meta charset="UTF-8"><title>StoryStudio | Smart SFX</title>
+        <meta charset="UTF-8"><title>StoryStudio | Universal Pro</title>
         <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;700&display=swap" rel="stylesheet">
         <style>
-            :root { --bg: #020617; --card: rgba(15, 23, 42, 0.9); --accent: #10b981; --text: #f1f5f9; --danger: #f43f5e; }
+            :root { --bg: #030712; --card: rgba(17, 24, 39, 0.9); --accent: #38bdf8; --text: #f1f5f9; --danger: #f43f5e; }
             body { background: var(--bg); color: var(--text); font-family: 'Outfit', sans-serif; padding: 40px 20px; }
             .container { max-width: 850px; margin: 0 auto; }
             .tabs { display: flex; gap: 8px; margin-bottom: 25px; }
-            .tab-btn { flex: 1; padding: 16px; background: rgba(255,255,255,0.03); border: none; border-radius: 14px; color: #64748b; cursor: pointer; font-weight: 800; }
-            .tab-btn.active { background: var(--accent); color: #020617; }
-            .content { display: none; background: var(--card); border-radius: 32px; padding: 40px; border: 1px solid rgba(255,255,255,0.05); }
+            .tab-btn { flex: 1; padding: 15px; background: rgba(255,255,255,0.03); border: none; border-radius: 12px; color: #64748b; cursor: pointer; font-weight: 800; transition: 0.3s; }
+            .tab-btn.active { background: var(--accent); color: #030712; }
+            .content { display: none; background: var(--card); border-radius: 28px; padding: 40px; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
             .content.active { display: block; }
-            textarea { width: 100%; min-height: 250px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.05); border-radius: 20px; padding: 25px; color: white; margin-bottom: 25px; font-family: inherit; line-height: 1.8; font-size: 1.05rem; }
-            .btn { width: 100%; padding: 20px; border-radius: 16px; border: none; font-weight: 800; cursor: pointer; background: var(--accent); color: #020617; font-size: 1.2rem; }
+            textarea { width: 100%; min-height: 250px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.05); border-radius: 18px; padding: 25px; color: white; margin-bottom: 25px; font-family: inherit; line-height: 1.8; font-size: 1.05rem; }
+            .btn { width: 100%; padding: 20px; border-radius: 15px; border: none; font-weight: 800; cursor: pointer; background: var(--accent); color: #030712; font-size: 1.2rem; }
             .mood-bar { display: flex; gap: 8px; margin-bottom: 25px; background: rgba(0,0,0,0.4); padding: 5px; border-radius: 14px; }
             .m-btn { flex: 1; padding: 12px; border: none; background: none; color: #94a3b8; cursor: pointer; border-radius: 10px; font-weight: 700; font-size: 11px; }
-            .m-btn.active { background: white; color: #020617; }
-            .sfx-hint { background: rgba(16,185,129,0.1); padding: 15px; border-radius: 14px; color: #10b981; font-size: 13px; margin-bottom: 20px; border: 1px dashed #10b981; }
-            .audio-card { background: rgba(255,255,255,0.02); padding: 22px; border-radius: 24px; margin-top: 15px; display: flex; align-items: center; gap: 15px; border: 1px solid rgba(255,255,255,0.03); }
-            audio { flex: 1; }
+            .m-btn.active { background: white; color: #030712; }
+            .audio-card { background: rgba(255,255,255,0.02); padding: 20px; border-radius: 20px; margin-top: 15px; display: flex; align-items: center; gap: 15px; border: 1px solid rgba(255,255,255,0.03); }
+            audio { flex: 1; filter: invert(0.9); }
         </style>
     </head>
     <body class="container">
-        <h1 style="text-align:center; font-weight:900; margin-bottom:50px; letter-spacing: 2px;">CINEMATIC<span style="color:var(--accent)">STUDIO</span> PRO</h1>
+        <h1 style="text-align:center; font-weight:900; margin-bottom:50px; letter-spacing:1px;">STORY<span style="color:var(--accent)">STUDIO</span> PRO</h1>
         
         <div class="tabs">
-            <button class="tab-btn active" onclick="sh('mix')">AUTO MIX (SFX ENABLED) 🔥</button>
+            <button class="tab-btn active" onclick="sh('mix')">AUTO MIX 🎬</button>
             <button class="tab-btn" onclick="sh('nar')">NARRATION</button>
             <button class="tab-btn" onclick="sh('ajay')">AJAY</button>
             <button class="tab-btn" onclick="sh('old')">OLD MAN</button>
         </div>
 
         <div id="mix" class="content active">
-            <div class="sfx-hint">🚀 <b>Smart SFX Mode Active:</b> Use words like <i>'बारिश', 'दरवाजा', 'खटखटाया', 'कदम', 'धड़कन'</i> in your story for automatic sound effects!</div>
-            <textarea id="t_mix" placeholder="Paste full script with Ajay: and Boodha: ..."></textarea>
+            <textarea id="t_mix" placeholder="Paste full script... Ajay: and Boodha:"></textarea>
             <div class="mood-bar">
                 <button class="m-btn active" id="m-normal" onclick="pick('normal')">NORMAL</button>
                 <button class="m-btn" id="m-horror" onclick="pick('horror')">HORROR</button>
                 <button class="m-btn" id="m-mystery" onclick="pick('mystery')">MYSTERY</button>
                 <button class="m-btn" id="m-happy" onclick="pick('happy')">HAPPY</button>
             </div>
-            <button class="btn" onclick="gen('auto')">PRODUCE CINEMATIC CHAPTER</button>
+            <button class="btn" onclick="gen('auto')">PRODUCE UNIVERSAL MASTER</button>
         </div>
 
-        <div id="nar" class="content">
-            <textarea id="t_nar" placeholder="Narrator voice..."></textarea>
-            <button class="btn" onclick="gen('nar')">PRODUCE TARA VOICE</button>
-        </div>
-
-        <div id="ajay" class="content">
-            <textarea id="t_ajay" placeholder="Ajay's voice..."></textarea>
-            <button class="btn" onclick="gen('ajay')">PRODUCE AMAN (BOY)</button>
-        </div>
-
-        <div id="old" class="content">
-            <textarea id="t_old" placeholder="Old man's voice..."></textarea>
-            <button class="btn" onclick="gen('oldman')">PRODUCE AMAN (OLD)</button>
-        </div>
+        <div id="nar" class="content"><textarea id="t_nar"></textarea><button class="btn" onclick="gen('nar')">GENERATE NARRATION</button></div>
+        <div id="ajay" class="content"><textarea id="t_ajay"></textarea><button class="btn" onclick="gen('ajay')">GENERATE AJAY VOICE</button></div>
+        <div id="old" class="content"><textarea id="t_old"></textarea><button class="btn" onclick="gen('oldman')">GENERATE OLD MAN VOICE</button></div>
 
         <div id="status" style="text-align:center; margin-top:30px; color:var(--accent); font-weight:800"></div>
         <div id="recs">${listHtml}</div>
@@ -195,7 +235,7 @@ app.get("/", (req, res) => {
             async function gen(sp) {
                 const text = document.getElementById('t_' + (sp === 'auto' ? 'mix' : (sp === 'oldman' ? 'old' : sp))).value.trim();
                 if(!text) return;
-                document.getElementById('status').innerText = "🎭 Understanding Story & Injecting Cinematic SFX...";
+                document.getElementById('status').innerText = "🎭 Universal Neural Processing... (Works on VPS/Mac)";
                 const res = await fetch('/tts-single', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -208,4 +248,4 @@ app.get("/", (req, res) => {
     </body></html>`);
 });
 
-app.listen(3000, () => console.log("🚀 Cinematic Studio Online"));
+app.listen(3000, () => console.log("🚀 Universal Cinema Online"));
