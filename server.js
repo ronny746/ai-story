@@ -16,17 +16,15 @@ const MOODS = {
 };
 
 const OUTPUT = path.join(__dirname, "output");
-const TEMP = path.join(__dirname, "temp_studio_vfinal");
+const TEMP = path.join(__dirname, "temp_universal");
 const BGM_DIR = path.join(__dirname, "assets", "bgm");
 const SFX_DIR = path.join(__dirname, "assets", "sfx");
 [OUTPUT, TEMP, BGM_DIR, SFX_DIR].forEach(dir => { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); });
 
 function uid() { return Date.now() + "_" + Math.floor(Math.random() * 1000); }
 
-// 🔹 Delay helper
 const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// 🔹 Smart Text Splitter for Google TTS (200 char limit fix)
 function splitText(text, limit = 150) {
     const chunks = [];
     const sentences = text.replace(/([।\.!\?\n])/g, "$1|").split("|");
@@ -43,7 +41,7 @@ function splitText(text, limit = 150) {
     return chunks;
 }
 
-// 🔹 High Quality Google TTS Downloader (Works on VPS/Linux)
+// 🔹 Universal Google TTS Downloader (No 'say' command needed)
 async function downloadGTTS(text, filepath) {
     return new Promise((resolve, reject) => {
         const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text.substring(0, 200))}&tl=hi&client=tw-ob`;
@@ -59,19 +57,15 @@ async function downloadGTTS(text, filepath) {
     });
 }
 
-// 🔹 Smart SFX Trigger
 function getSFXTrigger(text) {
-    if (text.includes("बारिश") || text.includes("बूँदें")) return "rain.mp3";
-    if (text.includes("दरवाजा") || text.includes("खिड़की") || text.includes("अलमारी")) return "door.mp3";
-    if (text.includes("खटखटाया") || text.includes("दस्तक")) return "knock.mp3";
-    if (text.includes("चला") || text.includes("कदम") || text.includes("रास्ते") || text.includes("उतरा")) return "footsteps.mp3";
-    if (text.includes("धड़कन") || text.includes("दिल") || text.includes("तेज़")) return "heartbeat.mp3";
+    if (text.includes("बारिश")) return "rain.mp3";
+    if (text.includes("दरवाजा")) return "door.mp3";
     return null;
 }
 
 app.post("/tts-single", async (req, res) => {
     const { text, mood, mode, speaker } = req.body;
-    if (!text) return res.status(400).json({ error: "Empty Script" });
+    if (!text) return res.status(400).json({ error: "Empty" });
     
     const sessionId = uid();
     const sessionDir = path.join(TEMP, sessionId);
@@ -83,38 +77,29 @@ app.post("/tts-single", async (req, res) => {
 
     try {
         if (mode === 'auto') {
-            console.log(`🎬 Producing Universal Chapter: ${sessionId}`);
             const lines = text.split('\n').filter(l => l.trim().length > 1);
             let chunkCounter = 0;
 
             for (let line of lines) {
                 let speedScale = 1.0;
-
-                // Character Detect
                 if (line.match(/अजय\s*[:|-]/)) { speedScale = 1.1; line = line.replace(/अजय\s*[:|-]/, "").trim(); }
-                else if (line.match(/बूढ़ा आदमी\s*[:|-]|बूढ़ा\s*[:|-]/)) { speedScale = 0.8; line = line.replace(/.*[:|-]/, "").trim(); }
+                else if (line.match(/बूढ़ा आदमी\s*[:|-]/)) { speedScale = 0.8; line = line.replace(/.*[:|-]/, "").trim(); }
 
                 const subChunks = splitText(line, 150);
                 for (let sub of subChunks) {
                     const rawPart = path.join(sessionDir, `p_${chunkCounter}.mp3`);
                     const speedPart = path.join(sessionDir, `s_${chunkCounter}.mp3`);
-                    
                     await downloadGTTS(sub, rawPart);
-                    // Apply speed scale for character acting
+                    // Universal Speed Control using FFmpeg
                     execSync(`ffmpeg -y -i "${rawPart}" -filter:a "atempo=${speedScale}" "${speedPart}"`, {stdio: 'ignore'});
                     timeline.push(speedPart);
-                    
-                    await wait(350); // Prevent Google block
+                    await wait(350);
                     chunkCounter++;
                 }
-
                 // Inject SFX
-                const sfx = getSFXTrigger(lines[i] || line);
-                if (sfx && fs.existsSync(path.join(SFX_DIR, sfx))) {
-                    timeline.push(path.join(SFX_DIR, sfx));
-                }
-
-                // Dramatic Gap
+                const sfx = getSFXTrigger(line);
+                if (sfx && fs.existsSync(path.join(SFX_DIR, sfx))) timeline.push(path.join(SFX_DIR, sfx));
+                
                 const gap = path.join(sessionDir, `g_${chunkCounter}.mp3`);
                 execSync(`ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 0.7 "${gap}"`, {stdio:'ignore'});
                 timeline.push(gap);
@@ -131,29 +116,16 @@ app.post("/tts-single", async (req, res) => {
             } else { fs.copyFileSync(rawMaster, finalMp3); }
 
         } else {
-            // Solo Mode
+            // Solo Mode (VPS Compatible)
             let speed = (speaker === 'oldman') ? 0.8 : (speaker === 'ajay' ? 1.1 : 1.0);
-            const subChunks = splitText(text, 150);
-            const parts = [];
-            for (let i = 0; i < subChunks.length; i++) {
-                const rp = path.join(sessionDir, `r_${i}.mp3`);
-                const sp = path.join(sessionDir, `s_${i}.mp3`);
-                await downloadGTTS(subChunks[i], rp);
-                execSync(`ffmpeg -y -i "${rp}" -filter:a "atempo=${speed}" "${sp}"`, {stdio: 'ignore'});
-                parts.push(sp);
-                await wait(300);
-            }
-            const lf = path.join(sessionDir, "list_solo.txt");
-            fs.writeFileSync(lf, parts.map(f => `file '${f}'`).join('\n'));
-            execSync(`ffmpeg -y -f concat -safe 0 -i "${lf}" -c copy "${finalMp3}"`, {stdio:'ignore'});
+            const rp = path.join(sessionDir, `r.mp3`);
+            await downloadGTTS(text, rp);
+            execSync(`ffmpeg -y -i "${rp}" -filter:a "atempo=${speed}" "${finalMp3}"`, {stdio: 'ignore'});
         }
 
         fs.rmSync(sessionDir, { recursive: true, force: true });
         res.json({ success: true, url: `/output/${sessionId}.mp3` });
-    } catch (err) { 
-        console.error(err);
-        res.status(500).json({ error: "Server Error" }); 
-    }
+    } catch (err) { res.status(500).json({ error: "Server error" }); }
 });
 
 app.delete("/api/audio/:id", (req, res) => {
@@ -166,21 +138,21 @@ app.use("/output", express.static(OUTPUT));
 
 app.get("/", (req, res) => {
     const audioFiles = fs.readdirSync(OUTPUT).filter(f => f.endsWith(".mp3")).sort((a,b) => fs.statSync(path.join(OUTPUT, b)).mtime - fs.statSync(path.join(OUTPUT, a)).mtime);
-    const listHtml = audioFiles.map(f => `<div class="audio-card"><div class="audio-info"><h3>Story Recording</h3><p>${f.substring(0,10)}...</p></div><audio controls src="/output/${f}"></audio><button class="del-btn" onclick="del('${f.replace(".mp3","")}')">×</button></div>`).join("");
+    const listHtml = audioFiles.map(f => `<div class="audio-card"><div class="audio-info"><h3>Production Record</h3><p>${f.substring(0,10)}...</p></div><audio controls src="/output/${f}"></audio><button class="del-btn" onclick="del('${f.replace(".mp3","")}')">×</button></div>`).join("");
 
     res.send(`<!DOCTYPE html>
     <html lang="en">
     <head>
-        <meta charset="UTF-8"><title>StoryStudio | Universal Pro</title>
+        <meta charset="UTF-8"><title>StoryStudio | Universal VPS</title>
         <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;700&display=swap" rel="stylesheet">
         <style>
             :root { --bg: #030712; --card: rgba(17, 24, 39, 0.9); --accent: #38bdf8; --text: #f1f5f9; --danger: #f43f5e; }
             body { background: var(--bg); color: var(--text); font-family: 'Outfit', sans-serif; padding: 40px 20px; }
             .container { max-width: 850px; margin: 0 auto; }
             .tabs { display: flex; gap: 8px; margin-bottom: 25px; }
-            .tab-btn { flex: 1; padding: 15px; background: rgba(255,255,255,0.03); border: none; border-radius: 12px; color: #64748b; cursor: pointer; font-weight: 800; transition: 0.3s; }
+            .tab-btn { flex: 1; padding: 15px; background: rgba(255,255,255,0.03); border: none; border-radius: 12px; color: #64748b; cursor: pointer; font-weight: 800; }
             .tab-btn.active { background: var(--accent); color: #030712; }
-            .content { display: none; background: var(--card); border-radius: 28px; padding: 40px; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+            .content { display: none; background: var(--card); border-radius: 28px; padding: 40px; border: 1px solid rgba(255,255,255,0.05); }
             .content.active { display: block; }
             textarea { width: 100%; min-height: 250px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.05); border-radius: 18px; padding: 25px; color: white; margin-bottom: 25px; font-family: inherit; line-height: 1.8; font-size: 1.05rem; }
             .btn { width: 100%; padding: 20px; border-radius: 15px; border: none; font-weight: 800; cursor: pointer; background: var(--accent); color: #030712; font-size: 1.2rem; }
@@ -192,7 +164,7 @@ app.get("/", (req, res) => {
         </style>
     </head>
     <body class="container">
-        <h1 style="text-align:center; font-weight:900; margin-bottom:50px; letter-spacing:1px;">STORY<span style="color:var(--accent)">STUDIO</span> PRO</h1>
+        <h1 style="text-align:center; font-weight:900; margin-bottom:50px;">STUDIO<span style="color:var(--accent)">PRO</span> VPS</h1>
         
         <div class="tabs">
             <button class="tab-btn active" onclick="sh('mix')">AUTO MIX 🎬</button>
@@ -235,7 +207,7 @@ app.get("/", (req, res) => {
             async function gen(sp) {
                 const text = document.getElementById('t_' + (sp === 'auto' ? 'mix' : (sp === 'oldman' ? 'old' : sp))).value.trim();
                 if(!text) return;
-                document.getElementById('status').innerText = "🎭 Universal Neural Processing... (Works on VPS/Mac)";
+                document.getElementById('status').innerText = "Processing Universal Neural Voice...";
                 const res = await fetch('/tts-single', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
