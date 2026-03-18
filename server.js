@@ -16,7 +16,7 @@ const MOODS = {
 };
 
 const OUTPUT = path.join(__dirname, "output");
-const TEMP = path.join(__dirname, "temp_universal");
+const TEMP = path.join(__dirname, "temp_universal_stable");
 const BGM_DIR = path.join(__dirname, "assets", "bgm");
 const SFX_DIR = path.join(__dirname, "assets", "sfx");
 [OUTPUT, TEMP, BGM_DIR, SFX_DIR].forEach(dir => { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); });
@@ -41,7 +41,6 @@ function splitText(text, limit = 150) {
     return chunks;
 }
 
-// 🔹 Universal Google TTS Downloader (No 'say' command needed)
 async function downloadGTTS(text, filepath) {
     return new Promise((resolve, reject) => {
         const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text.substring(0, 200))}&tl=hi&client=tw-ob`;
@@ -60,12 +59,15 @@ async function downloadGTTS(text, filepath) {
 function getSFXTrigger(text) {
     if (text.includes("बारिश")) return "rain.mp3";
     if (text.includes("दरवाजा")) return "door.mp3";
+    if (text.includes("खटखटाया")) return "knock.mp3";
+    if (text.includes("कदम")) return "footsteps.mp3";
+    if (text.includes("धड़कen")) return "heartbeat.mp3";
     return null;
 }
 
 app.post("/tts-single", async (req, res) => {
     const { text, mood, mode, speaker } = req.body;
-    if (!text) return res.status(400).json({ error: "Empty" });
+    if (!text) return res.status(400).json({ error: "No text" });
     
     const sessionId = uid();
     const sessionDir = path.join(TEMP, sessionId);
@@ -82,26 +84,30 @@ app.post("/tts-single", async (req, res) => {
 
             for (let line of lines) {
                 let speedScale = 1.0;
-                if (line.match(/अजय\s*[:|-]/)) { speedScale = 1.1; line = line.replace(/अजय\s*[:|-]/, "").trim(); }
-                else if (line.match(/बूढ़ा आदमी\s*[:|-]/)) { speedScale = 0.8; line = line.replace(/.*[:|-]/, "").trim(); }
+                let cleanLine = line;
 
-                const subChunks = splitText(line, 150);
+                if (line.match(/अजय\s*[:|-]/)) { speedScale = 1.1; cleanLine = line.replace(/अजय\s*[:|-]/, "").trim(); }
+                else if (line.match(/बूढ़ा आदमी\s*[:|-]|बूढ़ा\s*[:|-]/)) { speedScale = 0.8; cleanLine = line.replace(/.*[:|-]/, "").trim(); }
+
+                const subChunks = splitText(cleanLine, 150);
                 for (let sub of subChunks) {
-                    const rawPart = path.join(sessionDir, `p_${chunkCounter}.mp3`);
-                    const speedPart = path.join(sessionDir, `s_${chunkCounter}.mp3`);
-                    await downloadGTTS(sub, rawPart);
-                    // Universal Speed Control using FFmpeg
-                    execSync(`ffmpeg -y -i "${rawPart}" -filter:a "atempo=${speedScale}" "${speedPart}"`, {stdio: 'ignore'});
-                    timeline.push(speedPart);
-                    await wait(350);
+                    const rp = path.join(sessionDir, `p_${chunkCounter}.mp3`);
+                    const sp = path.join(sessionDir, `s_${chunkCounter}.mp3`);
+                    await downloadGTTS(sub, rp);
+                    execSync(`ffmpeg -y -i "${rp}" -filter:a "atempo=${speedScale}" "${sp}"`, {stdio: 'ignore'});
+                    timeline.push(sp);
+                    await wait(400); 
                     chunkCounter++;
                 }
-                // Inject SFX
+
+                // Inject SFX based on current line content
                 const sfx = getSFXTrigger(line);
-                if (sfx && fs.existsSync(path.join(SFX_DIR, sfx))) timeline.push(path.join(SFX_DIR, sfx));
+                if (sfx && fs.existsSync(path.join(SFX_DIR, sfx))) {
+                    timeline.push(path.join(SFX_DIR, sfx));
+                }
                 
                 const gap = path.join(sessionDir, `g_${chunkCounter}.mp3`);
-                execSync(`ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 0.7 "${gap}"`, {stdio:'ignore'});
+                execSync(`ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 0.8 "${gap}"`, {stdio:'ignore'});
                 timeline.push(gap);
             }
 
@@ -116,7 +122,6 @@ app.post("/tts-single", async (req, res) => {
             } else { fs.copyFileSync(rawMaster, finalMp3); }
 
         } else {
-            // Solo Mode (VPS Compatible)
             let speed = (speaker === 'oldman') ? 0.8 : (speaker === 'ajay' ? 1.1 : 1.0);
             const rp = path.join(sessionDir, `r.mp3`);
             await downloadGTTS(text, rp);
@@ -125,7 +130,10 @@ app.post("/tts-single", async (req, res) => {
 
         fs.rmSync(sessionDir, { recursive: true, force: true });
         res.json({ success: true, url: `/output/${sessionId}.mp3` });
-    } catch (err) { res.status(500).json({ error: "Server error" }); }
+    } catch (err) { 
+        console.error(err);
+        res.status(500).json({ error: "Production failed" }); 
+    }
 });
 
 app.delete("/api/audio/:id", (req, res) => {
@@ -143,10 +151,10 @@ app.get("/", (req, res) => {
     res.send(`<!DOCTYPE html>
     <html lang="en">
     <head>
-        <meta charset="UTF-8"><title>StoryStudio | Universal VPS</title>
+        <meta charset="UTF-8"><title>StoryStudio | Stable VPS</title>
         <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;700&display=swap" rel="stylesheet">
         <style>
-            :root { --bg: #030712; --card: rgba(17, 24, 39, 0.9); --accent: #38bdf8; --text: #f1f5f9; --danger: #f43f5e; }
+            :root { --bg: #030712; --card: rgba(17, 24, 39, 0.95); --accent: #38bdf8; --text: #f1f5f9; --danger: #f43f5e; }
             body { background: var(--bg); color: var(--text); font-family: 'Outfit', sans-serif; padding: 40px 20px; }
             .container { max-width: 850px; margin: 0 auto; }
             .tabs { display: flex; gap: 8px; margin-bottom: 25px; }
@@ -154,7 +162,7 @@ app.get("/", (req, res) => {
             .tab-btn.active { background: var(--accent); color: #030712; }
             .content { display: none; background: var(--card); border-radius: 28px; padding: 40px; border: 1px solid rgba(255,255,255,0.05); }
             .content.active { display: block; }
-            textarea { width: 100%; min-height: 250px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.05); border-radius: 18px; padding: 25px; color: white; margin-bottom: 25px; font-family: inherit; line-height: 1.8; font-size: 1.05rem; }
+            textarea { width: 100%; min-height: 250px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); border-radius: 18px; padding: 25px; color: white; margin-bottom: 25px; font-family: inherit; line-height: 1.8; font-size: 1.05rem; }
             .btn { width: 100%; padding: 20px; border-radius: 15px; border: none; font-weight: 800; cursor: pointer; background: var(--accent); color: #030712; font-size: 1.2rem; }
             .mood-bar { display: flex; gap: 8px; margin-bottom: 25px; background: rgba(0,0,0,0.4); padding: 5px; border-radius: 14px; }
             .m-btn { flex: 1; padding: 12px; border: none; background: none; color: #94a3b8; cursor: pointer; border-radius: 10px; font-weight: 700; font-size: 11px; }
@@ -181,12 +189,12 @@ app.get("/", (req, res) => {
                 <button class="m-btn" id="m-mystery" onclick="pick('mystery')">MYSTERY</button>
                 <button class="m-btn" id="m-happy" onclick="pick('happy')">HAPPY</button>
             </div>
-            <button class="btn" onclick="gen('auto')">PRODUCE UNIVERSAL MASTER</button>
+            <button class="btn" onclick="gen('auto')">PRODUCE FULL CHAPTER</button>
         </div>
 
-        <div id="nar" class="content"><textarea id="t_nar"></textarea><button class="btn" onclick="gen('nar')">GENERATE NARRATION</button></div>
-        <div id="ajay" class="content"><textarea id="t_ajay"></textarea><button class="btn" onclick="gen('ajay')">GENERATE AJAY VOICE</button></div>
-        <div id="old" class="content"><textarea id="t_old"></textarea><button class="btn" onclick="gen('oldman')">GENERATE OLD MAN VOICE</button></div>
+        <div id="nar" class="content"><textarea id="t_nar"></textarea><button class="btn" onclick="gen('nar')">NARRATION</button></div>
+        <div id="ajay" class="content"><textarea id="t_ajay"></textarea><button class="btn" onclick="gen('ajay')">AJAY VOICE</button></div>
+        <div id="old" class="content"><textarea id="t_old"></textarea><button class="btn" onclick="gen('oldman')">OLD MAN VOICE</button></div>
 
         <div id="status" style="text-align:center; margin-top:30px; color:var(--accent); font-weight:800"></div>
         <div id="recs">${listHtml}</div>
@@ -207,7 +215,7 @@ app.get("/", (req, res) => {
             async function gen(sp) {
                 const text = document.getElementById('t_' + (sp === 'auto' ? 'mix' : (sp === 'oldman' ? 'old' : sp))).value.trim();
                 if(!text) return;
-                document.getElementById('status').innerText = "Processing Universal Neural Voice...";
+                document.getElementById('status').innerText = "Processing Stable Neural Voice...";
                 const res = await fetch('/tts-single', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -220,4 +228,4 @@ app.get("/", (req, res) => {
     </body></html>`);
 });
 
-app.listen(3000, () => console.log("🚀 Universal Cinema Online"));
+app.listen(3000, () => console.log("🚀 Stable Cinema Online"));
